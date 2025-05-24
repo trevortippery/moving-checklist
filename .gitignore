@@ -1,0 +1,8 @@
+.DS_Store
+*.exe
+*.out
+go.work
+go.work.sum
+.vscode/
+/database
+./database/
