@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Envelope map[string]interface{}
@@ -43,4 +44,8 @@ func ReadIDParam(r *http.Request) (int64, error) {
 	fmt.Println("Parsed ID:", id)
 
 	return id, nil
+}
+
+func HashPassword(password []byte) ([]byte, error) {
+	return bcrypt.GenerateFromPassword(password, bcrypt.DefaultCost)
 }

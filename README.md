@@ -96,5 +96,5 @@ go test ./...
 ```
 
 ## Plans (TODO)
-- Add user authentication
-- Implement frontend (React)
+- [x] Add user authentication
+- [ ] Implement frontend (React)

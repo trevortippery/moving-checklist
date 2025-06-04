@@ -2,19 +2,21 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
 )
 
 type User struct {
-	ID        int       `json:"id"`
-	Username  string    `json:"username"`
-	Email     string    `json:"email"`
-	Password  []byte    `json:"-"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           int       `json:"id"`
+	Username     string    `json:"username"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"-"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type PostgresUserStore struct {
@@ -32,6 +34,7 @@ type UserStore interface {
 	GetUserByID(ctx context.Context, id int64) (*User, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	CheckEmailExists(ctx context.Context, email string) (bool, error)
+	GetUserByToken(ctx context.Context, token string, scope string) (*User, error)
 }
 
 func (pg *PostgresUserStore) RegisterUser(ctx context.Context, user *User) (*User, error) {
@@ -41,7 +44,7 @@ func (pg *PostgresUserStore) RegisterUser(ctx context.Context, user *User) (*Use
 	returning id, created_at, updated_at
 	`
 
-	err := pg.db.QueryRowContext(ctx, query, user.Username, user.Email, user.Password).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
+	err := pg.db.QueryRowContext(ctx, query, user.Username, user.Email, user.PasswordHash).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
 		return nil, err
@@ -94,7 +97,7 @@ func (pg *PostgresUserStore) UpdateUser(ctx context.Context, user *User) error {
 	result, err := transaction.ExecContext(ctx, query,
 		user.Username,
 		user.Email,
-		user.Password,
+		user.PasswordHash,
 		user.ID,
 	)
 
@@ -160,7 +163,7 @@ func (pg *PostgresUserStore) GetUserByEmail(ctx context.Context, email string) (
 		&user.ID,
 		&user.Username,
 		&user.Email,
-		&user.Password,
+		&user.PasswordHash,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -189,4 +192,34 @@ func (pg *PostgresUserStore) CheckEmailExists(ctx context.Context, email string)
 	}
 
 	return true, nil
+}
+
+func (pg *PostgresUserStore) GetUserByToken(ctx context.Context, token string, scope string) (*User, error) {
+
+	hash := sha256.Sum256([]byte(token))
+	hashedToken := base64.URLEncoding.EncodeToString(hash[:])
+
+	var user User
+	query := `
+			SELECT u.id, u.username, u.email, u.password_hash, u.created_at, u.updated_at
+			FROM users u
+			INNER JOIN tokens t ON u.id = t.user_id
+			WHERE t.token = $1 AND t.scope = $2 AND t.expiry > CURRENT_TIMESTAMP
+			LIMIT 1;
+	`
+	err := pg.db.QueryRowContext(ctx, query, hashedToken, scope).Scan(
+		&user.ID,
+		&user.Username,
+		&user.Email,
+		&user.PasswordHash,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil // token not found or expired
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
 }

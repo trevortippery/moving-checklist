@@ -42,6 +42,11 @@ func TestCreateUser(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Cleanup(func() {
+				_, err := db.Exec("DELETE FROM users")
+				require.NoError(t, err)
+			})
+
 			if tt.user == nil {
 				t.Skip("nil user not supported in this test")
 			}
@@ -69,8 +74,8 @@ func TestCreateUser(t *testing.T) {
 func validUser(username string, email string) *User {
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("testpass123"), bcrypt.DefaultCost)
 	return &User{
-		Username: username,
-		Email:    email,
-		Password: hashedPassword,
+		Username:     username,
+		Email:        email,
+		PasswordHash: string(hashedPassword),
 	}
 }

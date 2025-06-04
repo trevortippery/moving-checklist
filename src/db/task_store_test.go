@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -31,9 +32,9 @@ func setupTestDB(t *testing.T) *sql.DB {
 	}
 	fmt.Println("Migrations finished.")
 
-	_, err = db.Exec(`TRUNCATE tasks CASCADE`)
+	_, err = db.Exec(`TRUNCATE tasks, users CASCADE`)
 	if err != nil {
-		t.Fatalf("Truncating tasks table: %v", err)
+		t.Fatalf("Truncating tasks and users tables: %v", err)
 	}
 
 	return db
@@ -43,13 +44,14 @@ func TestCreateTask(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
+	user := createTestUser(t, db)
 	store := NewPostgresTaskStore(db)
 	ctx := context.Background()
 
 	tests := []taskTestCase{
 		{
 			name:    "Valid task",
-			task:    validTask("Change of address"),
+			task:    validTask("Change of address", user.ID),
 			wantErr: false,
 		},
 		{
@@ -104,44 +106,49 @@ func TestDeleteTask(t *testing.T) {
 	store := NewPostgresTaskStore(db)
 	ctx := context.Background()
 
-	tests := []taskTestCase{
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, db *sql.DB) (taskID int64, userID int)
+		wantErr bool
+	}{
 		{
-			name:    "Deleting existing task",
-			task:    validTask("Delete me"),
+			name: "Deleting existing task",
+			prepare: func(t *testing.T, db *sql.DB) (int64, int) {
+				user := createTestUser(t, db)
+				task := validTask("Delete me", user.ID)
+				createdTask, err := store.CreateTask(ctx, task)
+				require.NoError(t, err)
+				require.NotNil(t, createdTask)
+
+				return int64(createdTask.ID), user.ID
+			},
 			wantErr: false,
 		},
 		{
-			name:    "Deleting non-existing task",
-			task:    nil,
+			name: "Deleting non-existing task",
+			prepare: func(t *testing.T, db *sql.DB) (int64, int) {
+				user := createTestUser(t, db)
+				return 999999, user.ID // bogus task ID, valid user
+			},
 			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var taskID int64
-			var err error
+			taskID, userID := tt.prepare(t, db)
 
-			if tt.task != nil {
-				var createdTask *Task
-				createdTask, err = store.CreateTask(ctx, tt.task)
-				require.NoError(t, err)
-				require.NotNil(t, createdTask)
-				taskID = int64(createdTask.ID)
-			} else {
-				taskID = 999999
-			}
-
-			err = store.DeleteTask(ctx, taskID)
+			fmt.Printf("Deleting task with ID=%d, UserID=%d\n", taskID, userID)
+			err := store.DeleteTask(ctx, taskID, userID)
 
 			if tt.wantErr {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), "no task with id")
+				require.Error(t, err)
+				require.True(t, errors.Is(err, ErrTaskNotFound), "expected ErrTaskNotFound, got: %v", err)
 			} else {
-				assert.NoError(t, err)
-				deletedTask, err := store.GetTaskByID(ctx, taskID)
-				assert.NoError(t, err)
-				assert.Nil(t, deletedTask)
+				require.NoError(t, err)
+				task, err := store.GetTaskByID(ctx, taskID, userID)
+				require.NoError(t, err)
+				require.Nil(t, task)
 			}
 		})
 	}
@@ -151,13 +158,14 @@ func TestUpdateTask(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
+	user := createTestUser(t, db)
 	store := NewPostgresTaskStore(db)
 	ctx := context.Background()
 
 	tests := []taskTestCase{
 		{
 			name:    "Successfully updating an existing task",
-			task:    validTask("Update me"),
+			task:    validTask("Update me", user.ID),
 			wantErr: false,
 		},
 		{
@@ -200,7 +208,7 @@ func TestUpdateTask(t *testing.T) {
 				require.NoError(t, err)
 
 				// Fetch task to confirm update
-				updatedTask, err := store.GetTaskByID(ctx, int64(tt.task.ID))
+				updatedTask, err := store.GetTaskByID(ctx, int64(tt.task.ID), user.ID)
 				require.NoError(t, err)
 				require.Equal(t, "Updated Task Name", updatedTask.Name)
 				require.Equal(t, "Updated Description", updatedTask.Description)
@@ -213,13 +221,14 @@ func TestGetTaskByID(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
+	user := createTestUser(t, db)
 	store := NewPostgresTaskStore(db)
 	ctx := context.Background()
 
 	tests := []taskTestCase{
 		{
 			name:    "Sucessfully getting task by ID",
-			task:    validTask("Fetch this task"),
+			task:    validTask("Fetch this task", user.ID),
 			wantErr: false,
 		},
 		{
@@ -250,7 +259,7 @@ func TestGetTaskByID(t *testing.T) {
 				t.Skip("nil task not supported with current implementation")
 			}
 
-			result, err := store.GetTaskByID(ctx, taskID)
+			result, err := store.GetTaskByID(ctx, taskID, user.ID)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -267,8 +276,9 @@ func TestGetTaskByID(t *testing.T) {
 	}
 }
 
-func validTask(name string) *Task {
+func validTask(name string, userID int) *Task {
 	return &Task{
+		UserID:      userID,
 		Name:        name,
 		Description: "some description",
 		Category:    "work",
@@ -278,4 +288,19 @@ func validTask(name string) *Task {
 			Valid: true,
 		},
 	}
+}
+
+func createTestUser(t *testing.T, db *sql.DB) *User {
+	userStore := NewPostgresUserStore(db)
+	user := &User{
+		Username:     fmt.Sprintf("testuser_%d", time.Now().UnixNano()),
+		Email:        fmt.Sprintf("user%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hashed-password",
+	}
+
+	createdUser, err := userStore.RegisterUser(context.Background(), user)
+	require.NoError(t, err)
+	require.NotNil(t, createdUser)
+
+	return createdUser
 }

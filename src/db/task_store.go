@@ -4,8 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 )
+
+var ErrTaskNotFound = errors.New("task not found")
 
 type Task struct {
 	ID          int          `json:"id"`
@@ -29,9 +30,10 @@ func NewPostgresTaskStore(db *sql.DB) *PostgresTaskStore {
 
 type TaskStore interface {
 	CreateTask(ctx context.Context, task *Task) (*Task, error)
-	DeleteTask(ctx context.Context, id int64) error
+	DeleteTask(ctx context.Context, id int64, userID int) error
 	UpdateTask(ctx context.Context, task *Task) error
-	GetTaskByID(ctx context.Context, id int64) (*Task, error)
+	GetTaskByID(ctx context.Context, id int64, userID int) (*Task, error)
+	GetTasksByUserID(ctx context.Context, userID int) ([]*Task, error)
 }
 
 func (pg *PostgresTaskStore) CreateTask(ctx context.Context, task *Task) (*Task, error) {
@@ -43,19 +45,18 @@ func (pg *PostgresTaskStore) CreateTask(ctx context.Context, task *Task) (*Task,
 	defer transaction.Rollback()
 
 	query := `
-	INSERT INTO tasks (name, description, category, is_complete, due_date, created_at, updated_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7)
+	INSERT INTO tasks (user_id, name, description, category, is_complete, due_date, created_at, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 	RETURNING id
 	`
 
 	err = transaction.QueryRowContext(ctx, query,
+		task.UserID,
 		task.Name,
 		task.Description,
 		task.Category,
 		task.IsComplete,
 		task.DueDate,
-		task.CreatedAt,
-		task.UpdatedAt,
 	).Scan(&task.ID)
 
 	if err != nil {
@@ -69,9 +70,9 @@ func (pg *PostgresTaskStore) CreateTask(ctx context.Context, task *Task) (*Task,
 	return task, nil
 }
 
-func (pg *PostgresTaskStore) DeleteTask(ctx context.Context, id int64) error {
-	query := ` DELETE FROM tasks WHERE id = $1`
-	result, err := pg.db.ExecContext(ctx, query, id)
+func (pg *PostgresTaskStore) DeleteTask(ctx context.Context, id int64, userID int) error {
+	query := ` DELETE FROM tasks WHERE id = $1 AND user_id = $2`
+	result, err := pg.db.ExecContext(ctx, query, id, userID)
 	if err != nil {
 		return err
 	}
@@ -82,7 +83,7 @@ func (pg *PostgresTaskStore) DeleteTask(ctx context.Context, id int64) error {
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("no task with id %d: %w", id, sql.ErrNoRows)
+		return ErrTaskNotFound
 	}
 
 	return nil
@@ -103,7 +104,7 @@ func (pg *PostgresTaskStore) UpdateTask(ctx context.Context, task *Task) error {
 	query := `
 	UPDATE tasks
 	SET name = $1, description = $2, category = $3, is_complete = $4, due_date = $5, updated_at = $6
-	WHERE id = $7
+	WHERE id = $7 and user_id = $8
 	`
 
 	result, err := transaction.ExecContext(ctx, query,
@@ -113,7 +114,9 @@ func (pg *PostgresTaskStore) UpdateTask(ctx context.Context, task *Task) error {
 		task.IsComplete,
 		task.DueDate,
 		task.UpdatedAt,
-		task.ID)
+		task.ID,
+		task.UserID,
+	)
 
 	if err != nil {
 		return err
@@ -125,7 +128,7 @@ func (pg *PostgresTaskStore) UpdateTask(ctx context.Context, task *Task) error {
 	}
 
 	if rowsAffected == 0 {
-		return sql.ErrNoRows
+		return ErrTaskNotFound
 	}
 
 	err = transaction.Commit()
@@ -136,17 +139,18 @@ func (pg *PostgresTaskStore) UpdateTask(ctx context.Context, task *Task) error {
 	return nil
 }
 
-func (pg *PostgresTaskStore) GetTaskByID(ctx context.Context, id int64) (*Task, error) {
+func (pg *PostgresTaskStore) GetTaskByID(ctx context.Context, id int64, userID int) (*Task, error) {
 	task := &Task{}
 
 	query := `
-	SELECT id, name, description, category, is_complete, due_date, created_at, updated_at
+	SELECT id, user_id, name, description, category, is_complete, due_date, created_at, updated_at
 	FROM tasks
-	WHERE id = $1
+	WHERE id = $1 AND user_id = $2
 	`
 
-	err := pg.db.QueryRowContext(ctx, query, id).Scan(
+	err := pg.db.QueryRowContext(ctx, query, id, userID).Scan(
 		&task.ID,
+		&task.UserID,
 		&task.Name,
 		&task.Description,
 		&task.Category,
@@ -157,7 +161,7 @@ func (pg *PostgresTaskStore) GetTaskByID(ctx context.Context, id int64) (*Task, 
 	)
 
 	if err == sql.ErrNoRows {
-		return nil, nil
+		return nil, ErrTaskNotFound
 	}
 
 	if err != nil {
@@ -165,4 +169,42 @@ func (pg *PostgresTaskStore) GetTaskByID(ctx context.Context, id int64) (*Task, 
 	}
 
 	return task, nil
+}
+
+func (pg *PostgresTaskStore) GetTasksByUserID(ctx context.Context, userID int) ([]*Task, error) {
+	query := `
+	SELECT id, user_id, name, description, category, is_complete, due_date, created_at, updated_at
+	FROM tasks
+	WHERE user_id = $1
+	ORDER BY created_at DESC
+	`
+
+	rows, err := pg.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	var tasks []*Task
+	for rows.Next() {
+		task := &Task{}
+		err := rows.Scan(
+			&task.ID,
+			&task.UserID,
+			&task.Name,
+			&task.Description,
+			&task.Category,
+			&task.IsComplete,
+			&task.DueDate,
+			&task.CreatedAt,
+			&task.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+
+	return tasks, nil
 }
